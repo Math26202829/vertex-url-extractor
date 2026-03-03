@@ -2,66 +2,86 @@ import streamlit as st
 import pandas as pd
 import json
 from io import BytesIO
+import torch
+import spacy
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from collections import defaultdict, Counter
+import subprocess
+import sys
 
-# 📌 Titre simple
-st.title("Vertex URL Extractor")
+# -------------------------
+# Titre principal
+# -------------------------
+st.title("Vertex URL Extractor + Analyse de sentiment par marque")
 
-# 📌 1. Upload du fichier
+# -------------------------
+# 1️⃣ Upload fichier
+# -------------------------
 uploaded_file = st.file_uploader("Upload ton fichier Excel", type=["xlsx"])
 
+# -------------------------
+# Fonction pour charger spaCy avec download si besoin
+# -------------------------
+@st.cache_resource
+def load_spacy():
+    try:
+        return spacy.load("en_core_web_sm")
+    except:
+        subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+        return spacy.load("en_core_web_sm")
+
+# -------------------------
+# Fonction pour charger modèle sentiment transformer local
+# -------------------------
+@st.cache_resource
+def load_sentiment_model():
+    model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name)
+    return tokenizer, model
+
+nlp = load_spacy()
+tokenizer, model = load_sentiment_model()
+
+# -------------------------
+# MODULE 1 – Extraction Vertex URLs
+# -------------------------
 if uploaded_file is not None:
 
-    # 📌 2. Charger le fichier
+    # Lecture du fichier
     df = pd.read_excel(uploaded_file, sheet_name="All_categ_raw")
 
-    # 📌 3. Vérifier colonne
     col_name = "grounding_search_metadata"
     if col_name not in df.columns:
         st.error(f"La colonne '{col_name}' n'existe pas.")
     else:
 
-        # 📌 4. Fonction pour extraire les URI du JSON
         def extract_vertex_urls(cell):
             if pd.isna(cell):
                 return []
-            
             try:
                 data = json.loads(cell)
             except:
                 return []
-            
             urls = []
-            
             if "sources" in data:
                 for source in data["sources"]:
                     if "web" in source and "uri" in source["web"]:
                         url = source["web"]["uri"]
                         if url.startswith("https://vertexaisearch.cloud.google.com"):
                             urls.append(url)
-            
             return urls
 
-        # 📌 5. Extraction
         df["extracted_urls"] = df[col_name].apply(extract_vertex_urls)
-
-        # 📌 6. Exploser (1 URL = 1 ligne)
         df_exploded = df.explode("extracted_urls")
-
-        # 📌 7. Remplacer la colonne d'origine par l’URL seule
         df_exploded[col_name] = df_exploded["extracted_urls"]
-
-        # Supprimer colonne temporaire
         df_exploded = df_exploded.drop(columns=["extracted_urls"])
-
-        # Supprimer lignes sans URL
         df_exploded = df_exploded.dropna(subset=[col_name])
 
-        # 📌 8. Sauvegarder en mémoire
         output = BytesIO()
         df_exploded.to_excel(output, index=False, engine="openpyxl")
         output.seek(0)
 
-        # 📌 9. Télécharger
         st.download_button(
             label="Télécharger le fichier transformé",
             data=output,
@@ -69,46 +89,23 @@ if uploaded_file is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-import streamlit as st
-import pandas as pd
-import torch
-import spacy
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from collections import defaultdict, Counter
-import numpy as np
-
+# -------------------------
+# MODULE 2 – Analyse sentiment par marque
+# -------------------------
 st.markdown("---")
 st.header("📊 Module 2 – Analyse de sentiment par marque (Transformer local)")
 
 if uploaded_file is not None:
 
-    df = pd.read_excel(uploaded_file)
+    df_sentiment = pd.read_excel(uploaded_file)
 
-    if "G" in df.columns and "C" in df.columns:
-
-        # -------------------------
-        # Load models (cached)
-        # -------------------------
-        @st.cache_resource
-        def load_spacy():
-            return spacy.load("en_core_web_sm")
-
-        @st.cache_resource
-        def load_sentiment_model():
-            model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForSequenceClassification.from_pretrained(model_name)
-            return tokenizer, model
-
-        nlp = load_spacy()
-        tokenizer, model = load_sentiment_model()
+    if "G" in df_sentiment.columns and "C" in df_sentiment.columns:
 
         results = []
         progress_bar = st.progress(0)
+        total_rows = len(df_sentiment)
 
-        total_rows = len(df)
-
-        for idx, row in df.iterrows():
+        for idx, row in df_sentiment.iterrows():
 
             text = str(row["G"])
             theme = row["C"]
@@ -123,16 +120,12 @@ if uploaded_file is not None:
                     continue
 
                 sent_doc = nlp(sent_text)
-
-                # Extract brands via ORG entities
+                # Extraction des marques
                 brands = [ent.text.strip() for ent in sent_doc.ents if ent.label_ == "ORG"]
-
                 if not brands:
                     continue
 
-                # -------------------------
-                # Sentiment via transformer
-                # -------------------------
+                # Sentiment phrase-level
                 inputs = tokenizer(
                     sent_text,
                     return_tensors="pt",
@@ -145,18 +138,10 @@ if uploaded_file is not None:
 
                 scores = torch.nn.functional.softmax(outputs.logits, dim=1)
                 scores = scores.detach().numpy()[0]
+                sentiment_score = float(scores[2] - scores[0])  # approx -1 à +1
 
-                # Cardiff labels: 0=negative, 1=neutral, 2=positive
-                sentiment_score = float(scores[2] - scores[0])  # scale approx -1 to +1
-
-                # -------------------------
-                # Extract adjectives
-                # -------------------------
-                adjectives = [
-                    token.text.lower()
-                    for token in sent_doc
-                    if token.pos_ == "ADJ"
-                ]
+                # Adjectifs phrase-level
+                adjectives = [token.text.lower() for token in sent_doc if token.pos_ == "ADJ"]
 
                 for brand in set(brands):
                     results.append({
@@ -171,12 +156,9 @@ if uploaded_file is not None:
         if not results:
             st.warning("Aucune marque détectée.")
         else:
-
             results_df = pd.DataFrame(results)
 
-            # -------------------------
-            # Mean sentiment per brand x theme
-            # -------------------------
+            # Moyenne sentiment par marque x thématique
             sentiment_summary = (
                 results_df
                 .groupby(["brand", "theme"])["sentiment"]
@@ -184,21 +166,14 @@ if uploaded_file is not None:
                 .reset_index()
             )
 
-            # -------------------------
-            # Top adjectives per brand x theme
-            # -------------------------
+            # Top adjectifs par marque x thématique
             adj_dict = defaultdict(list)
-
             for _, row in results_df.iterrows():
                 adj_dict[(row["brand"], row["theme"])].extend(row["adjectives"])
 
             adj_data = []
-
             for key, adjs in adj_dict.items():
-                most_common_adj = [
-                    adj for adj, _ in Counter(adjs).most_common(5)
-                ]
-
+                most_common_adj = [adj for adj, _ in Counter(adjs).most_common(5)]
                 adj_data.append({
                     "brand": key[0],
                     "theme": key[1],
@@ -206,23 +181,13 @@ if uploaded_file is not None:
                 })
 
             adj_df = pd.DataFrame(adj_data)
-
-            final_df = sentiment_summary.merge(
-                adj_df,
-                on=["brand", "theme"],
-                how="left"
-            )
-
-            # Clean sorting
-            final_df = final_df.sort_values(
-                by=["theme", "sentiment"],
-                ascending=[True, False]
-            )
+            final_df = sentiment_summary.merge(adj_df, on=["brand", "theme"], how="left")
+            final_df = final_df.sort_values(by=["theme", "sentiment"], ascending=[True, False])
 
             st.subheader("📈 Résultats")
             st.dataframe(final_df)
 
-            # Export
+            # Export Excel
             output_file = "sentiment_analysis_by_brand.xlsx"
             final_df.to_excel(output_file, index=False)
 
@@ -230,7 +195,8 @@ if uploaded_file is not None:
                 st.download_button(
                     "⬇️ Télécharger les résultats",
                     f,
-                    file_name=output_file
+                    file_name=output_file,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
     else:
