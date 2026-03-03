@@ -67,4 +67,4 @@ if uploaded_file is not None:
             data=output,
             file_name="reformatted_All_categ_raw.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        
+        )
