@@ -45,25 +45,41 @@ nlp = load_spacy()
 tokenizer, model = load_sentiment_model()
 
 # -------------------------
-# Titre principal
+# Interface principale
 # -------------------------
 st.title("Vertex URL Extractor + Analyse de sentiment par marque")
+st.markdown(
+    "Cette app permet :\n"
+    "- D'extraire les URLs Vertex à partir de la colonne `grounding_search_metadata`\n"
+    "- D'analyser le sentiment des réponses LLM phrase par phrase pour chaque marque"
+)
 
-# -------------------------
-# 1️⃣ Upload fichier
-# -------------------------
-uploaded_file = st.file_uploader("Upload ton fichier Excel", type=["xlsx"])
+# Upload fichier
+uploaded_file = st.file_uploader("📂 Upload ton fichier Excel", type=["xlsx"])
 
-# -------------------------
-# MODULE 1 – Extraction Vertex URLs
-# -------------------------
-if uploaded_file is not None:
+# Message si aucun fichier
+if uploaded_file is None:
+    st.info("📌 Veuillez uploader un fichier Excel pour activer les modules.")
+else:
+    # -------------------------
+    # Lecture du fichier
+    # -------------------------
+    try:
+        df = pd.read_excel(uploaded_file)
+    except Exception as e:
+        st.error(f"Impossible de lire le fichier Excel : {e}")
+        st.stop()
 
-    df = pd.read_excel(uploaded_file, sheet_name="All_categ_raw")
+    st.success("✅ Fichier chargé avec succès !")
+
+    # -------------------------
+    # MODULE 1 – Extraction Vertex URLs
+    # -------------------------
+    st.header("1️⃣ Vertex URL Extractor")
 
     col_name = "grounding_search_metadata"
     if col_name not in df.columns:
-        st.error(f"La colonne '{col_name}' n'existe pas.")
+        st.warning(f"La colonne `{col_name}` n'existe pas dans le fichier.")
     else:
 
         def extract_vertex_urls(cell):
@@ -88,49 +104,47 @@ if uploaded_file is not None:
         df_exploded = df_exploded.drop(columns=["extracted_urls"])
         df_exploded = df_exploded.dropna(subset=[col_name])
 
-        output = BytesIO()
-        df_exploded.to_excel(output, index=False, engine="openpyxl")
-        output.seek(0)
+        st.write("📄 Aperçu des URLs extraites :")
+        st.dataframe(df_exploded.head(10))
+
+        # Export Excel
+        output_urls = BytesIO()
+        df_exploded.to_excel(output_urls, index=False, engine="openpyxl")
+        output_urls.seek(0)
 
         st.download_button(
-            label="Télécharger le fichier transformé",
-            data=output,
+            label="⬇️ Télécharger le fichier transformé (URLs)",
+            data=output_urls,
             file_name="reformatted_All_categ_raw.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-# -------------------------
-# MODULE 2 – Analyse sentiment par marque
-# -------------------------
-st.markdown("---")
-st.header("📊 Module 2 – Analyse de sentiment par marque (Transformer local)")
+    # -------------------------
+    # MODULE 2 – Analyse sentiment par marque
+    # -------------------------
+    st.markdown("---")
+    st.header("2️⃣ Analyse de sentiment par marque")
 
-if uploaded_file is not None:
+    if "G" not in df.columns or "C" not in df.columns:
+        st.warning("Les colonnes `G` (réponses LLM) et `C` (thématique) doivent exister pour le module sentiment.")
+    else:
 
-    df_sentiment = pd.read_excel(uploaded_file)
-
-    if "G" in df_sentiment.columns and "C" in df_sentiment.columns:
-
+        st.info("⚡ Analyse en cours… cela peut prendre quelques minutes selon la taille du fichier.")
         results = []
         progress_bar = st.progress(0)
-        total_rows = len(df_sentiment)
+        total_rows = len(df)
 
-        for idx, row in df_sentiment.iterrows():
-
+        for idx, row in df.iterrows():
             text = str(row["G"])
             theme = row["C"]
-
             doc = nlp(text)
             sentences = list(doc.sents)
 
             for sent in sentences:
-
                 sent_text = sent.text.strip()
                 if len(sent_text) < 5:
                     continue
-
                 sent_doc = nlp(sent_text)
-                # Extraction des marques
                 brands = [ent.text.strip() for ent in sent_doc.ents if ent.label_ == "ORG"]
                 if not brands:
                     continue
@@ -142,15 +156,11 @@ if uploaded_file is not None:
                     truncation=True,
                     max_length=512
                 )
-
                 with torch.no_grad():
                     outputs = model(**inputs)
+                scores = torch.nn.functional.softmax(outputs.logits, dim=1).numpy()[0]
+                sentiment_score = float(scores[2] - scores[0])
 
-                scores = torch.nn.functional.softmax(outputs.logits, dim=1)
-                scores = scores.detach().numpy()[0]
-                sentiment_score = float(scores[2] - scores[0])  # approx -1 à +1
-
-                # Adjectifs phrase-level
                 adjectives = [token.text.lower() for token in sent_doc if token.pos_ == "ADJ"]
 
                 for brand in set(brands):
@@ -164,19 +174,13 @@ if uploaded_file is not None:
             progress_bar.progress((idx + 1) / total_rows)
 
         if not results:
-            st.warning("Aucune marque détectée.")
+            st.warning("Aucune marque détectée dans les réponses LLM.")
         else:
             results_df = pd.DataFrame(results)
-
-            # Moyenne sentiment par marque x thématique
             sentiment_summary = (
-                results_df
-                .groupby(["brand", "theme"])["sentiment"]
-                .mean()
-                .reset_index()
+                results_df.groupby(["brand", "theme"])["sentiment"].mean().reset_index()
             )
 
-            # Top adjectifs par marque x thématique
             adj_dict = defaultdict(list)
             for _, row in results_df.iterrows():
                 adj_dict[(row["brand"], row["theme"])].extend(row["adjectives"])
@@ -194,20 +198,16 @@ if uploaded_file is not None:
             final_df = sentiment_summary.merge(adj_df, on=["brand", "theme"], how="left")
             final_df = final_df.sort_values(by=["theme", "sentiment"], ascending=[True, False])
 
-            st.subheader("📈 Résultats")
+            st.subheader("📈 Résultats sentiment par marque")
             st.dataframe(final_df)
 
-            # Export Excel
-            output_file = "sentiment_analysis_by_brand.xlsx"
-            final_df.to_excel(output_file, index=False)
+            output_sentiment = BytesIO()
+            final_df.to_excel(output_sentiment, index=False, engine="openpyxl")
+            output_sentiment.seek(0)
 
-            with open(output_file, "rb") as f:
-                st.download_button(
-                    "⬇️ Télécharger les résultats",
-                    f,
-                    file_name=output_file,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-    else:
-        st.error("Les colonnes C (thématique) et G (réponses LLM) doivent exister.")
+            st.download_button(
+                label="⬇️ Télécharger les résultats sentiment",
+                data=output_sentiment,
+                file_name="sentiment_analysis_by_brand.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
