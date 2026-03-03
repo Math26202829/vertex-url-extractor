@@ -2,12 +2,47 @@ import streamlit as st
 import pandas as pd
 import json
 from io import BytesIO
-import torch
-import spacy
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from collections import defaultdict, Counter
 import subprocess
 import sys
+
+# -------------------------
+# Installer torch + transformers dynamiquement si absent
+# -------------------------
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "torch==2.2.0", "transformers==4.41.2"])
+    import torch
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+# -------------------------
+# Installer spaCy + modèle dynamiquement si absent
+# -------------------------
+try:
+    import spacy
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "spacy==3.7.4"])
+    import spacy
+
+@st.cache_resource
+def load_spacy():
+    try:
+        return spacy.load("en_core_web_sm")
+    except:
+        subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+        return spacy.load("en_core_web_sm")
+
+@st.cache_resource
+def load_sentiment_model():
+    model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name)
+    return tokenizer, model
+
+nlp = load_spacy()
+tokenizer, model = load_sentiment_model()
 
 # -------------------------
 # Titre principal
@@ -20,35 +55,10 @@ st.title("Vertex URL Extractor + Analyse de sentiment par marque")
 uploaded_file = st.file_uploader("Upload ton fichier Excel", type=["xlsx"])
 
 # -------------------------
-# Fonction pour charger spaCy avec download si besoin
-# -------------------------
-@st.cache_resource
-def load_spacy():
-    try:
-        return spacy.load("en_core_web_sm")
-    except:
-        subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
-        return spacy.load("en_core_web_sm")
-
-# -------------------------
-# Fonction pour charger modèle sentiment transformer local
-# -------------------------
-@st.cache_resource
-def load_sentiment_model():
-    model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(model_name)
-    return tokenizer, model
-
-nlp = load_spacy()
-tokenizer, model = load_sentiment_model()
-
-# -------------------------
 # MODULE 1 – Extraction Vertex URLs
 # -------------------------
 if uploaded_file is not None:
 
-    # Lecture du fichier
     df = pd.read_excel(uploaded_file, sheet_name="All_categ_raw")
 
     col_name = "grounding_search_metadata"
