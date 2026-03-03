@@ -1,3 +1,10 @@
 streamlit
 pandas
 openpyxl
+transformers
+torch
+spacy
+en-core-web-sm
+pandas
+openpyxl
+python -m spacy download en_core_web_sm
